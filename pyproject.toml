@@ -1,7 +1,7 @@
 [project]
-name = "agenthub"
+name = "researchpilot"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Python-based multi-agent AI system that researches user queries, analyzes information, verifies findings, and generates structured reports."
 readme = "README.md"
 authors = [
     { name = "abdellatifmht", email = "abdelmahamt50@gmail.com" }
@@ -10,7 +10,7 @@ requires-python = ">=3.14"
 dependencies = []
 
 [project.scripts]
-agenthub = "agenthub:main"
+researchpilot = "researchpilot:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
