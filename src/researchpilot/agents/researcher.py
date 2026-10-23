@@ -1,15 +1,16 @@
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from researchpilot.tools.research import TavilySearchTools
 from researchpilot.utils import get_gemini_api_key
 
 tavily_tools = TavilySearchTools()
-
+gemini_api_key = get_gemini_api_key()
 
 @tool
 def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
@@ -113,41 +114,81 @@ Provide a structured research summary containing:
 - Remaining information gaps
 """
 
-gemini_api_key = get_gemini_api_key()
-
-model = init_chat_model(
+llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
-    model_provider="google_genai",
     api_key=gemini_api_key,
 )
 
-agent = create_agent(
-    model=model,
-    tools=research_tools,
-    system_prompt=SYSTEM_PROMPT,
-)
+research_llm = llm.bind_tools(research_tools)
+
+def researcher_node(state: MessagesState) -> dict:
+    """Generate the next action for the Research Agent based on the current state."""
+
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *state["messages"]
+    ]
+
+    response = research_llm.invoke(messages)
+
+    return {"messages": [response]}
 
 
-def research_agent(query: str) -> None:
-    """Run the research agent to investigate a research question.
+def build_researcher_graph():
+    """Build the agent's internal tool-calling graph"""
 
-    Args:
-        query: The research question to investigate.
-    """
-    if not query.strip():
-        raise ValueError("Research question cannot be empty.")
+    builder = StateGraph(MessagesState)
 
-    question = query.strip()
+    builder.add_node("researcher", researcher_node)
+    builder.add_node("tools", ToolNode(research_tools))
 
-    response = agent.invoke({
-        "messages": [HumanMessage(content=question)]
-    })
+    builder.add_edge(START, "researcher")
 
-    print(response)
+    # Add conditional edges to allow the agent to call tools based on its reasoning
+    builder.add_conditional_edges(
+        "researcher",
+        tools_condition,
+    )
 
-    research_summary = response.content.strip()
+    # After using tools, the agent should 
+    # return to the researcher node to continue its reasoning
+    builder.add_edge("tools", "researcher")
 
-    print("Research Summary:")
-    print(research_summary)
+    return builder.compile()
 
-    print("Research completed. Final summary provided above.")
+
+
+researcher_graph = build_researcher_graph()
+
+
+def research_agent(query: str) -> str:
+    """Run the Research Agent on a given research question and return the final summary."""
+
+    result = researcher_graph.invoke(
+        {
+            "messages": [
+                HumanMessage(content=query)
+            ]
+        },
+        config={
+            "recursion_limit": 20,
+        }
+    )
+
+    final_message = result["messages"][-1]
+    content = final_message.content
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(text_parts)
+
+    return str(content)
