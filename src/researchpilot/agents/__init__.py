@@ -1,2 +1,4 @@
-def main() -> None:
-    print("Hello from agenthub!")
+from .researcher import research_agent
+
+__all__ = ["research_agent"]
+

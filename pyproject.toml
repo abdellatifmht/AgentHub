@@ -7,7 +7,15 @@ authors = [
     { name = "abdellatifmht", email = "abdelmahamt50@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "dotenv-python>=0.0.1",
+    "langchain>=1.4.7",
+    "langchain-google-genai>=4.4.2",
+    "pyright>=1.1.414",
+    "python-dotenv>=1.2.4",
+    "ruff>=0.17.2",
+    "tavily-python>=0.8.5",
+]
 
 [project.scripts]
 researchpilot = "researchpilot:main"
