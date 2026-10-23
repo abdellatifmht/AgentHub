@@ -1,3 +1,5 @@
+import ast
+import json
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -268,45 +270,84 @@ def research_agent(query: str) -> dict[str, Any]:
     if not query.strip():
         raise ValueError("Research query cannot be empty.")
 
-    result = researcher_graph.invoke(
-        {
-            "messages": [
-                HumanMessage(content=query)
+    try:
+        result = researcher_graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(content=query.strip())
+                ]
+            },
+            config={
+                "recursion_limit": 40,
+            }
+        )
+        messages = result.get("messages", [])
+    except Exception:
+        messages = []
+
+    summary = ""
+    if messages:
+        final_message = messages[-1]
+        content = final_message.content
+        if isinstance(content, str):
+            summary = content
+        elif isinstance(content, list):
+            text_parts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
             ]
-        },
-        config={
-            "recursion_limit": 20,
-        }
-    )
-
-    final_message = result["messages"][-1]
-    content = final_message.content
-
-    if isinstance(content, str):
-        summary = content
-    elif isinstance(content, list):
-        text_parts = [
-            block["text"]
-            for block in content
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        ]
-        summary = "\n".join(text_parts)
-    else:
-        summary = str(content)
+            summary = "\n".join(text_parts)
+        else:
+            summary = str(content)
 
     sources: list[dict[str, Any]] = []
-    for message in result["messages"]:
-        if not isinstance(message, ToolMessage) or message.name != "web_search":
+    for message in messages:
+        if not isinstance(message, ToolMessage):
             continue
-        if isinstance(message.content, list):
-            sources.extend(
-                source for source in message.content if isinstance(source, dict)
-            )
+        sources.extend(_source_records(message.content))
+
+    if not sources:
+        try:
+            raw_results: list[dict[str, Any]] = []
+            for optimized_query in _search_queries(query.strip()):
+                raw_results.extend(tavily_tools.web_search(optimized_query, 10))
+            sources = _filter_sources(raw_results)
+        except Exception:
+            sources = []
 
     return {
-        "query": query,
+        "query": query.strip(),
         "sources": _filter_sources(sources),
         "summary": summary,
     }
+
+
+def _source_records(content: Any) -> list[dict[str, Any]]:
+    """Extract source records from the content formats used by tool messages."""
+    if isinstance(content, str):
+        try:
+            return _source_records(json.loads(content))
+        except json.JSONDecodeError:
+            try:
+                return _source_records(ast.literal_eval(content))
+            except (SyntaxError, ValueError):
+                return []
+
+    if isinstance(content, dict):
+        if isinstance(content.get("url"), str):
+            return [content]
+        for key in ("results", "content", "text"):
+            if key in content:
+                return _source_records(content[key])
+        return []
+
+    if isinstance(content, (list, tuple)):
+        records: list[dict[str, Any]] = []
+        for item in content:
+            records.extend(_source_records(item))
+        return records
+
+    return []
