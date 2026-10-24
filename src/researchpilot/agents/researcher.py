@@ -1,8 +1,4 @@
-import ast
-import json
-from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -10,105 +6,15 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from researchpilot.tools.research import TavilySearchTools
+from researchpilot.tools.research import (
+    TavilySearchTools,
+    filter_sources,
+    source_records,
+)
 from researchpilot.utils import get_gemini_api_key
 
 tavily_tools = TavilySearchTools()
 gemini_api_key = get_gemini_api_key()
-
-
-TRUSTED_DOMAIN_SUFFIXES = (".gov", ".edu", ".int")
-TRUSTED_DOMAINS = {
-    "bbc.com",
-    "reuters.com",
-    "who.int",
-    "un.org",
-    "worldbank.org",
-}
-MIN_RELEVANCE_SCORE = 0.35
-
-
-def _search_queries(query: str) -> list[str]:
-    """Create complementary queries instead of relying on one search wording."""
-    return [
-        query,
-        f"{query} official primary source",
-        f"{query} latest evidence report",
-    ]
-
-
-def _reliability_score(url: str) -> float:
-    """Estimate source reliability from domain signals available in a result."""
-    parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower()
-    hostname = hostname.removeprefix("www.")
-
-    if hostname in TRUSTED_DOMAINS or hostname.endswith(TRUSTED_DOMAIN_SUFFIXES):
-        return 1.0
-    if parsed.scheme == "https":
-        return 0.6
-    return 0.4
-
-
-def _freshness_score(published_date: Any) -> float:
-    """Return a comparable freshness score without discarding undated sources."""
-    if not isinstance(published_date, str) or not published_date:
-        return 0.5
-
-    try:
-        published = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
-    except ValueError:
-        return 0.5
-
-    if published.tzinfo is None:
-        published = published.replace(tzinfo=timezone.utc)
-    age_days = max((datetime.now(timezone.utc) - published).days, 0)
-    return max(0.0, 1.0 - (age_days / 3650))
-
-
-def _filter_sources(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Filter, rank, and normalize Tavily results for the agent."""
-    sources: list[dict[str, Any]] = []
-    seen_urls: set[str] = set()
-
-    for result in results:
-        url = result.get("url")
-        title = result.get("title")
-        score = result.get("score", 0)
-        if (
-            not isinstance(url, str)
-            or not url
-            or url in seen_urls
-            or not isinstance(title, str)
-            or not title
-            or not isinstance(score, (int, float))
-            or score < MIN_RELEVANCE_SCORE
-        ):
-            continue
-
-        seen_urls.add(url)
-        published_date = result.get("published_date")
-        sources.append(
-            {
-                "url": url,
-                "title": title,
-                "excerpt": result.get("content", ""),
-                "relevance_score": score,
-                "freshness_score": _freshness_score(published_date),
-                "reliability_score": _reliability_score(url),
-                "published_date": published_date,
-            }
-        )
-
-    sources.sort(
-        key=lambda source: (
-            source["relevance_score"]
-            * source["freshness_score"]
-            * source["reliability_score"]
-        ),
-        reverse=True,
-    )
-    return sources
 
 
 @tool
@@ -125,11 +31,7 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     if not 1 <= max_results <= 20:
         raise ValueError("max_results must be between 1 and 20.")
 
-    raw_results: list[dict[str, Any]] = []
-    for optimized_query in _search_queries(query.strip()):
-        raw_results.extend(tavily_tools.web_search(optimized_query, max_results))
-
-    return _filter_sources(raw_results)[: max_results * 3]
+    return tavily_tools.search(query.strip(), max_results)
 
 
 @tool
@@ -221,6 +123,7 @@ Provide a structured research summary containing:
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
     api_key=gemini_api_key,
+    temperature=0,
 )
 
 research_llm = llm.bind_tools(research_tools)
@@ -282,7 +185,7 @@ def research_agent(query: str) -> dict[str, Any]:
             }
         )
         messages = result.get("messages", [])
-    except Exception:
+    except (ConnectionError, TimeoutError):
         messages = []
 
     summary = ""
@@ -305,49 +208,20 @@ def research_agent(query: str) -> dict[str, Any]:
 
     sources: list[dict[str, Any]] = []
     for message in messages:
-        if not isinstance(message, ToolMessage):
+        if isinstance(message, ToolMessage):
+            sources.extend(source_records(message.content))
             continue
-        sources.extend(_source_records(message.content))
+        # Fallback: scan any message content that might contain tool results
+        sources.extend(source_records(getattr(message, "content", None)))
 
     if not sources:
         try:
-            raw_results: list[dict[str, Any]] = []
-            for optimized_query in _search_queries(query.strip()):
-                raw_results.extend(tavily_tools.web_search(optimized_query, 10))
-            sources = _filter_sources(raw_results)
-        except Exception:
+            sources = tavily_tools.search(query.strip(), 10)
+        except (ConnectionError, TimeoutError):
             sources = []
 
     return {
         "query": query.strip(),
-        "sources": _filter_sources(sources),
+        "sources": filter_sources(sources),
         "summary": summary,
     }
-
-
-def _source_records(content: Any) -> list[dict[str, Any]]:
-    """Extract source records from the content formats used by tool messages."""
-    if isinstance(content, str):
-        try:
-            return _source_records(json.loads(content))
-        except json.JSONDecodeError:
-            try:
-                return _source_records(ast.literal_eval(content))
-            except (SyntaxError, ValueError):
-                return []
-
-    if isinstance(content, dict):
-        if isinstance(content.get("url"), str):
-            return [content]
-        for key in ("results", "content", "text"):
-            if key in content:
-                return _source_records(content[key])
-        return []
-
-    if isinstance(content, (list, tuple)):
-        records: list[dict[str, Any]] = []
-        for item in content:
-            records.extend(_source_records(item))
-        return records
-
-    return []

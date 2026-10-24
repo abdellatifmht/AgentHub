@@ -6,7 +6,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
 from researchpilot.tools.analysis import SourceContentTools
-from researchpilot.utils import get_gemini_api_key
+from researchpilot.utils import PAGE_CONTENT_LIMIT, get_gemini_api_key
 
 source_tools = SourceContentTools()
 
@@ -91,7 +91,10 @@ def _source_urls(sources: list[dict[str, Any]]) -> list[str]:
 def _content_for_analysis(pages: list[dict[str, Any]]) -> str:
     sections = []
     for page in pages:
-        sections.append(f"SOURCE URL: {page['url']}\n{page['content']}")
+        content = page["content"]
+        sections.append(
+            f"SOURCE URL: {page['url']}\n{content[:PAGE_CONTENT_LIMIT]}"
+        )
     return "\n\n".join(sections)
 
 

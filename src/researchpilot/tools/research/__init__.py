@@ -1,8 +1,144 @@
+import ast
+import json
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from researchpilot.utils import CHARACTER_LIMIT, PAGE_CONTENT_LIMIT, get_tavily_client
 
-__all__ = ["TavilySearchTools"]
+__all__ = [
+    "TavilySearchTools",
+    "filter_sources",
+    "source_records",
+]
+
+
+TRUSTED_DOMAIN_SUFFIXES = (".gov", ".edu", ".int")
+TRUSTED_DOMAINS = {
+    "bbc.com",
+    "reuters.com",
+    "who.int",
+    "un.org",
+    "worldbank.org",
+}
+MIN_RELEVANCE_SCORE = 0.35
+
+
+def _search_queries(query: str) -> list[str]:
+    """Create complementary queries instead of relying on one search wording."""
+    return [
+        query,
+        f"{query} official primary source",
+        f"{query} latest evidence report",
+    ]
+
+
+def _reliability_score(url: str) -> float:
+    """Estimate source reliability from domain signals available in a result."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower().removeprefix("www.")
+
+    if hostname in TRUSTED_DOMAINS or hostname.endswith(TRUSTED_DOMAIN_SUFFIXES):
+        return 1.0
+    if parsed.scheme == "https":
+        return 0.6
+    return 0.4
+
+
+def _freshness_score(published_date: Any) -> float:
+    """Return a comparable freshness score without discarding undated sources."""
+    if not isinstance(published_date, str) or not published_date:
+        return 0.5
+
+    try:
+        published = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.5
+
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    age_days = max((datetime.now(timezone.utc) - published).days, 0)
+    return max(0.0, 1.0 - (age_days / 3650))
+
+
+def filter_sources(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter, rank, and normalize raw or already-normalized search results."""
+    sources: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for result in results:
+        url = result.get("url")
+        title = result.get("title")
+        score = result.get("score", result.get("relevance_score", 0))
+        if (
+            not isinstance(url, str)
+            or not url
+            or url in seen_urls
+            or not isinstance(title, str)
+            or not title
+            or not isinstance(score, (int, float))
+            or score < MIN_RELEVANCE_SCORE
+        ):
+            continue
+
+        seen_urls.add(url)
+        published_date = result.get("published_date")
+        sources.append(
+            {
+                "url": url,
+                "title": title,
+                "excerpt": result.get("content", result.get("excerpt", "")),
+                "relevance_score": score,
+                "freshness_score": _freshness_score(published_date),
+                "reliability_score": result.get(
+                    "reliability_score",
+                    _reliability_score(url),
+                ),
+                "published_date": published_date,
+            }
+        )
+
+    sources.sort(
+        key=lambda source: (
+            source["relevance_score"]
+            * source["freshness_score"]
+            * source["reliability_score"]
+        ),
+        reverse=True,
+    )
+    return sources
+
+
+def source_records(content: Any) -> list[dict[str, Any]]:
+    """Extract source records from serialized tool-message content."""
+    if isinstance(content, str):
+        serialized = content.strip()
+        if not serialized:
+            return []
+        try:
+            return source_records(json.loads(serialized))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        try:
+            return source_records(ast.literal_eval(serialized))
+        except (SyntaxError, ValueError, TypeError):
+            return []
+
+    if isinstance(content, dict):
+        if isinstance(content.get("url"), str):
+            return [content]
+        for key in ("results", "content", "text", "pages", "data"):
+            if key in content:
+                return source_records(content[key])
+        return []
+
+    if isinstance(content, (list, tuple)):
+        records: list[dict[str, Any]] = []
+        for item in content:
+            records.extend(source_records(item))
+        return records
+
+    return []
 
 
 class ResearchError(RuntimeError):
@@ -58,6 +194,13 @@ class TavilySearchTools:
 
         except (ConnectionError, TimeoutError) as e:
             raise ResearchError(f"Error during web search: {e}")
+
+    def search(self, query: str, max_results: int = 5) -> list[dict[str, Any]]:
+        """Run complementary searches and return ranked source records."""
+        raw_results: list[dict[str, Any]] = []
+        for optimized_query in _search_queries(query.strip()):
+            raw_results.extend(self.web_search(optimized_query, max_results))
+        return filter_sources(raw_results)[: max_results * 3]
 
     def extract_page_content(self, urls: list[str]) -> dict[str, Any]:
         """Extract content from a web page using the Tavily API."""

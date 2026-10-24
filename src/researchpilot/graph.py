@@ -21,11 +21,8 @@ def run_researcher(state: ResearchPilotState) -> dict:
             "research_output": result.get("summary", ""),
             "sources": result.get("sources") or [],
         }
-    except Exception:
-        return {
-            "research_output": "",
-            "sources": [],
-        }
+    except Exception as exc:
+        raise RuntimeError("Research stage failed.") from exc
 
 
 def run_analysis(state: ResearchPilotState) -> dict:
@@ -41,14 +38,8 @@ def run_analysis(state: ResearchPilotState) -> dict:
         }
     try:
         return {"analysis_report": analysis_agent(sources)}
-    except Exception:
-        return {
-            "analysis_report": {
-                "source_summaries": [],
-                "atomic_facts": [],
-                "contradictions": [],
-            }
-        }
+    except Exception as exc:
+        raise RuntimeError("Analysis stage failed.") from exc
 
 
 def build_graph():

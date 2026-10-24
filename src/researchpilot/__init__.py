@@ -6,8 +6,6 @@ def main():
         query = input("Enter your research query: ")
     except EOFError:
         return
-    except Exception:
-        return
 
     result = run_research_pilot(query)
 
@@ -19,10 +17,35 @@ def main():
             if isinstance(source, dict):
                 print(f"- {source.get('url', '')}")
         print("\nAnalysis Report:")
+
         analysis_report = result.get("analysis_report") or {}
-        print("Source Summaries:", analysis_report.get("source_summaries", []))
-        print("Atomic Facts:", analysis_report.get("atomic_facts", []))
-        print("Contradictions:", analysis_report.get("contradictions", []))
+        summaries = analysis_report.get("source_summaries", [])
+
+        if summaries:
+            print("\nSource Summaries:")
+            for summary in summaries[:5]:
+                if isinstance(summary, dict):
+                    print(f"- {summary.get('source_url', '')}: {summary.get('summary', '')}")
+        else:
+            print("No source summaries available.")
+
+        atomic_facts = analysis_report.get("atomic_facts", [])
+        if atomic_facts:
+            print("\nAtomic Facts:")
+            for fact in atomic_facts[:5]:
+                if isinstance(fact, dict):
+                    print(f"- {fact.get('statement', '')}")
+        else:
+            print("No atomic facts available.")
+        
+        contradictions = analysis_report.get("contradictions", [])
+        if contradictions:
+            print("\nContradictions:")
+            for contradiction in contradictions[:5]:
+                if isinstance(contradiction, dict):
+                    print(f"- {contradiction.get('statement', '')}")
+        else:
+            print("\nNo contradictions available.")
     else:
         print(result)
 
